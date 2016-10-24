@@ -70,10 +70,10 @@ public class ListActivity extends Activity {
         setContentView(R.layout.activity_list);
 
         wrappers = new ArrayList<>();
-        sendBroadcast(new Intent("com.sensordroid.HELLO"));
         registerReceiver((wrapperReceiver),
                 new IntentFilter(RegisterReceiver.REGISTER_ACTION)
         );
+        sendBroadcast(new Intent("com.sensordroid.HELLO"));
 
         Button networkButton = (Button)findViewById(R.id.buttonConfigure);
         networkButton.setOnClickListener(new View.OnClickListener() {
