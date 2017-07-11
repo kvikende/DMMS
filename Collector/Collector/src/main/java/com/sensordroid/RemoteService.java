@@ -10,6 +10,7 @@ import android.net.Uri;
 import android.os.AsyncTask;
 import android.os.Environment;
 import android.os.IBinder;
+import android.os.PowerManager;
 import android.support.v4.content.LocalBroadcastManager;
 import android.support.v7.app.NotificationCompat;
 import android.util.Log;
@@ -18,6 +19,9 @@ import com.sensordroid.Activities.ConfigurationActivity;
 import com.sensordroid.Handlers.DispatchFileHandler;
 import com.sensordroid.Handlers.DispatchTCPHandler;
 
+import org.json.JSONException;
+import org.json.JSONObject;
+
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.FileWriter;
@@ -25,8 +29,14 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.io.PrintWriter;
 import java.net.Socket;
+import java.text.DateFormat;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.TimeZone;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 public class RemoteService extends Service {
     private static final String TAG = "RemoteService";
@@ -39,6 +49,9 @@ public class RemoteService extends Service {
     // Update count variables
     private static boolean update = true;
     private static int count;
+
+    // Wakelock
+    private PowerManager.WakeLock wakeLock;
 
     // TCP variables
     public static String SERVER_IP;
@@ -69,6 +82,10 @@ public class RemoteService extends Service {
          */
         @Override
         public void putJson(String json) {
+            if (executor.isShutdown()) {
+                return;
+            }
+
             if (toFile) {
                 executor.submit(new DispatchFileHandler(json, fileOut));
             } else {
@@ -94,13 +111,21 @@ public class RemoteService extends Service {
         broadcaster.sendBroadcast(intent);
     }
 
+    private String getDateTimeAsISOString(Date date) {
+        TimeZone timeZone = TimeZone.getTimeZone("UTC");
+        DateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSZ");
+        dateFormat.setTimeZone(timeZone);
+
+        return dateFormat.format(date);
+    }
+
 
     /*
         Return binder object to expose the implemented interface to remote processes.
      */
     @Override
     public IBinder onBind(Intent intent) {
-        Log.d(TAG, "Got connection from some dude.");
+        Log.d(TAG, "Got connection from some wrapper.");
         return binder;
     }
 
@@ -113,6 +138,11 @@ public class RemoteService extends Service {
         // Initialize variables
         count = 0;
         broadcaster = LocalBroadcastManager.getInstance(this);
+        PowerManager manager = (PowerManager) getSystemService(POWER_SERVICE);
+        wakeLock = manager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Collector");
+
+        // Acquire wakelock
+        wakeLock.acquire();
 
         // Set the Service to the foreground to decrease chance of getting killed
         toForeground();
@@ -129,6 +159,21 @@ public class RemoteService extends Service {
 
         if (toFile){
             openFile(filePath);
+
+            // Write session start metadata to file.
+            {
+                try {
+                    JSONObject data = new JSONObject();
+                    data.put("type", "session-start");
+                    data.put("time", getDateTimeAsISOString(new Date()));
+                    String str = data.toString();
+                    executor.execute(new DispatchFileHandler(str, fileOut));
+
+                } catch (JSONException e) {
+                    e.printStackTrace();
+                }
+            }
+
         }else {
             new ConnectTCPTask().execute();
         }
@@ -213,15 +258,40 @@ public class RemoteService extends Service {
         }
         if (toFile && fileOut != null){
             try {
+                // Create and write end session to file.
+                {
+                    JSONObject data = new JSONObject();
+                    data.put("type", "session-end");
+                    data.put("time", getDateTimeAsISOString(new Date()));
+                    // Submit.
+                    executor.execute(new DispatchFileHandler(data.toString(), fileOut));
+                }
+                executor.shutdown();
+                boolean didShutDownInTime = executor.awaitTermination(2, TimeUnit.SECONDS);
+                if (!didShutDownInTime) {
+                    // did not finish in time!
+                    Log.w(TAG, "Did not shut down in time!");
+                    executor.shutdownNow();
+                }
+
                 fileOut.flush();
                 fileOut.close();
             } catch (IOException e) {
                 e.printStackTrace();
+            } catch (JSONException e) {
+                e.printStackTrace();
+            } catch (InterruptedException e) {
+                e.printStackTrace();
             }
         }
 
+        // Remove wakelock
+        wakeLock.release();
+
         // Move the service back from the foreground
         stopForeground(true);
-        super.onCreate();
+
+        // Call super's destroy
+        super.onDestroy();
     }
 }
